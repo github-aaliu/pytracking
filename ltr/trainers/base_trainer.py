@@ -58,7 +58,7 @@ class BaseTrainer:
         """
 
         epoch = -1
-        num_tries = 10
+        num_tries = 1
         for i in range(num_tries):
             try:
                 if load_latest:

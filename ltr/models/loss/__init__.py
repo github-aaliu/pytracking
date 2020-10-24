@@ -1,1 +1,1 @@
-from .target_classification import LBHinge, LBHingev2, IsTargetCellLoss, TrackingClassificationAccuracy
+from .target_classification import LBHinge, LBHingev2, IsTargetCellLoss, TrackingClassificationAccuracy, thw_loss

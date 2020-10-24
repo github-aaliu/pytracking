@@ -30,12 +30,12 @@ def run(settings):
 
     # Train datasets
     lasot_train = Lasot(settings.env.lasot_dir, split='train')
-    got10k_train = Got10k(settings.env.got10k_dir, split='vottrain')
-    trackingnet_train = TrackingNet(settings.env.trackingnet_dir, set_ids=list(range(4)))
-    coco_train = MSCOCOSeq(settings.env.coco_dir)
+    #got10k_train = Got10k(settings.env.got10k_dir, split='vottrain')
+    #trackingnet_train = TrackingNet(settings.env.trackingnet_dir, set_ids=list(range(4)))
+    #coco_train = MSCOCOSeq(settings.env.coco_dir)
 
     # Validation datasets
-    got10k_val = Got10k(settings.env.got10k_dir, split='votval')
+    #got10k_val = Got10k(settings.env.got10k_dir, split='votval')
 
 
     # Data transform
@@ -49,7 +49,7 @@ def run(settings):
 
     # The tracking pairs processing module
     output_sigma = settings.output_sigma_factor / settings.search_area_factor
-    proposal_params = {'min_iou': 0.1, 'boxes_per_frame': 8, 'sigma_factor': [0.01, 0.05, 0.1, 0.2, 0.3]}
+    proposal_params = {'min_iou': 0.1, 'boxes_per_frame': 4, 'sigma_factor': [0.01, 0.05, 0.1, 0.2, 0.3]}
     label_params = {'feature_sz': settings.feature_sz, 'sigma_factor': output_sigma, 'kernel_sz': settings.target_filter_sz}
     data_processing_train = processing.DiMPProcessing(search_area_factor=settings.search_area_factor,
                                                       output_sz=settings.output_sz,
@@ -72,13 +72,13 @@ def run(settings):
                                                     joint_transform=transform_joint)
 
     # Train sampler and loader
-    dataset_train = sampler.DiMPSampler([lasot_train, got10k_train, trackingnet_train, coco_train], [0.25,1,1,1],
+    dataset_train = sampler.DiMPSampler([lasot_train], [1],
                                         samples_per_epoch=26000, max_gap=30, num_test_frames=3, num_train_frames=3,
                                         processing=data_processing_train)
 
     loader_train = LTRLoader('train', dataset_train, training=True, batch_size=settings.batch_size, num_workers=settings.num_workers,
                              shuffle=True, drop_last=True, stack_dim=1)
-
+    """
     # Validation samplers and loaders
     dataset_val = sampler.DiMPSampler([got10k_val], [1], samples_per_epoch=5000, max_gap=30,
                                       num_test_frames=3, num_train_frames=3,
@@ -86,7 +86,7 @@ def run(settings):
 
     loader_val = LTRLoader('val', dataset_val, training=False, batch_size=settings.batch_size, num_workers=settings.num_workers,
                            shuffle=False, drop_last=True, epoch_interval=5, stack_dim=1)
-
+    """
     # Create network and actor
     net = dimpnet.dimpnet18(filter_size=settings.target_filter_sz, backbone_pretrained=True, optim_iter=5,
                             clf_feat_norm=True, final_conv=True, optim_init_step=0.9, optim_init_reg=0.1,
@@ -113,6 +113,6 @@ def run(settings):
 
     lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.2)
 
-    trainer = LTRTrainer(actor, [loader_train, loader_val], optimizer, settings, lr_scheduler)
+    trainer = LTRTrainer(actor, [loader_train], optimizer, settings, lr_scheduler)
 
     trainer.train(50, load_latest=True, fail_safe=True)

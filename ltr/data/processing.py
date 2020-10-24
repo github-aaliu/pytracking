@@ -6,6 +6,7 @@ from pytracking import TensorDict
 import ltr.data.processing_utils as prutils
 
 
+
 def stack_tensors(x):
     if isinstance(x, (list, tuple)) and isinstance(x[0], torch.Tensor):
         return torch.stack(x)
@@ -489,6 +490,187 @@ class DiMPProcessing(BaseProcessing):
 
         return data
 
+class siamDProcessing(BaseProcessing):
+    """ The processing class used for training DiMP. The images are processed in the following way.
+    First, the target bounding box is jittered by adding some noise. Next, a square region (called search region )
+    centered at the jittered target center, and of area search_area_factor^2 times the area of the jittered box is
+    cropped from the image. The reason for jittering the target box is to avoid learning the bias that the target is
+    always at the center of the search region. The search region is then resized to a fixed size given by the
+    argument output_sz. A Gaussian label centered at the target is generated for each image. These label functions are
+    used for computing the loss of the predicted classification model on the test images. A set of proposals are
+    also generated for the test images by jittering the ground truth box. These proposals are used to train the
+    bounding box estimating branch.
+
+    """
+
+    def __init__(self, search_area_factor, output_sz, center_jitter_factor, scale_jitter_factor, feature_sz=18,crop_type='replicate',
+                 max_scale_change=None, threshold=0.2, mode='pair', proposal_params=None, label_function_params=None, *args, **kwargs):
+        """
+        args:
+            search_area_factor - The size of the search region  relative to the target size.
+            output_sz - An integer, denoting the size to which the search region is resized. The search region is always
+                        square.
+            center_jitter_factor - A dict containing the amount of jittering to be applied to the target center before
+                                    extracting the search region. See _get_jittered_box for how the jittering is done.
+            scale_jitter_factor - A dict containing the amount of jittering to be applied to the target size before
+                                    extracting the search region. See _get_jittered_box for how the jittering is done.
+            crop_type - If 'replicate', the boundary pixels are replicated in case the search region crop goes out of image.
+                        If 'inside', the search region crop is shifted/shrunk to fit completely inside the image.
+                        If 'inside_major', the search region crop is shifted/shrunk to fit completely inside one axis of the image.
+            max_scale_change - Maximum allowed scale change when performing the crop (only applicable for 'inside' and 'inside_major')
+            mode - Either 'pair' or 'sequence'. If mode='sequence', then output has an extra dimension for frames
+            proposal_params - Arguments for the proposal generation process. See _generate_proposals for details.
+            label_function_params - Arguments for the label generation process. See _generate_label_function for details.
+        """
+        super().__init__(*args, **kwargs)
+        self.search_area_factor = search_area_factor
+        self.output_sz = output_sz
+        self.feature_sz = feature_sz
+        self.center_jitter_factor = center_jitter_factor
+        self.scale_jitter_factor = scale_jitter_factor
+        self.crop_type = crop_type
+        self.threshold = threshold
+        self.mode = mode
+        self.max_scale_change = max_scale_change
+
+        self.proposal_params = proposal_params
+        self.label_function_params = label_function_params
+
+        self.p_x, self.p_y = torch.meshgrid(torch.arange(feature_sz),torch.arange(feature_sz))
+
+
+
+
+
+
+    def _get_jittered_box(self, box, mode):
+        """ Jitter the input box
+        args:
+            box - input bounding box
+            mode - string 'train' or 'test' indicating train or test data
+
+        returns:
+            torch.Tensor - jittered box
+        """
+
+        jittered_size = box[2:4] * torch.exp(torch.randn(2) * self.scale_jitter_factor[mode])
+        max_offset = (jittered_size.prod().sqrt() * torch.tensor(self.center_jitter_factor[mode]).float())
+        jittered_center = box[0:2] + 0.5 * box[2:4] + max_offset * (torch.rand(2) - 0.5)
+
+        return torch.cat((jittered_center - 0.5 * jittered_size, jittered_size), dim=0)
+
+    def _generate_proposals(self, box):
+        """ Generates proposals by adding noise to the input box
+        args:
+            box - input box
+
+        returns:
+            torch.Tensor - Array of shape (num_proposals, 4) containing proposals
+            torch.Tensor - Array of shape (num_proposals,) containing IoU overlap of each proposal with the input box. The
+                        IoU is mapped to [-1, 1]
+        """
+        # Generate proposals
+        num_proposals = self.proposal_params['boxes_per_frame']
+        hw_factor = self.proposal_params['hw_factor']
+        area_factor = self.proposal_params['area_factor']
+
+        hw_rand = prutils.rand_uniform(hw_factor[0],hw_factor[1],num_proposals)
+        area_rand = prutils.rand_uniform(area_factor[0],area_factor[1],num_proposals)
+        h_noise = (area_rand/hw_rand)
+        w_noise = (area_rand*hw_rand)
+        hw_noise = torch.stack((h_noise, w_noise), dim=1)
+
+        #be careful the diffrent box and coordinate
+        proposals = box[2:]*hw_noise
+
+        gt_hw = (1/hw_noise).log()
+        # Map to [-1, 1]
+        #gt_iou = gt_iou * 2 - 1
+        return proposals, gt_hw
+
+    def _generate_label_function(self, target_bb):
+        """ Generates the gaussian label function centered at target_bb
+        args:
+            target_bb - target bounding box (num_images, 4)
+
+        returns:
+            torch.Tensor - Tensor of shape (num_images, label_sz, label_sz) containing the label for each sample
+        """
+
+        gauss_label = prutils.gaussian_label_function(target_bb.view(-1, 4), self.label_function_params['sigma_factor'],
+                                                      self.label_function_params['kernel_sz'],
+                                                      self.label_function_params['feature_sz'], self.output_sz,
+                                                      end_pad_if_even=self.label_function_params.get('end_pad_if_even', True))
+
+        return gauss_label
+
+    def __call__(self, data: TensorDict):
+        """
+        args:
+            data - The input data, should contain the following fields:
+                'train_images', test_images', 'train_anno', 'test_anno'
+        returns:
+            TensorDict - output data block with following fields:
+                'train_images', 'test_images', 'train_anno', 'test_anno', 'test_proposals', 'proposal_iou',
+                'test_label' (optional), 'train_label' (optional), 'test_label_density' (optional), 'train_label_density' (optional)
+        """
+        num_sq = self.proposal_params['boxes_per_frame']
+        test_anno_ori = [f[:2]+0.5*f[2:] for f in data['test_anno']]
+        test_anno_ori = stack_tensors(test_anno_ori)
+        if self.transform['joint'] is not None:
+            data['train_images'], data['train_anno'] = self.transform['joint'](image=data['train_images'], bbox=data['train_anno'])
+            data['test_images'], data['test_anno'] = self.transform['joint'](image=data['test_images'], bbox=data['test_anno'], new_roll=False)
+
+        for s in ['train', 'test']:
+            assert self.mode == 'sequence' or len(data[s + '_images']) == 1, \
+                "In pair mode, num train/test frames must be 1"
+
+            # Add a uniform noise to the center pos
+            jittered_anno = [self._get_jittered_box(a, s) for a in data[s + '_anno']]
+
+            crops, boxes, box_crop= prutils.siamD_image_crop(data[s + '_images'], jittered_anno, data[s + '_anno'],
+                                                     self.search_area_factor, self.output_sz, mode=self.crop_type,
+                                                     max_scale_change=self.max_scale_change)
+
+            data[s + '_images'], data[s + '_anno'] = self.transform[s](image=crops, bbox=boxes, joint=False)
+        crop_box= stack_tensors(box_crop).clone()
+
+        # Generate proposals
+        if self.proposal_params:
+            frame2_proposals, gt_hw = zip(*[self._generate_proposals(a) for a in data['test_anno']])
+
+            data['test_proposals'] = list(frame2_proposals)
+            hw_gt=stack_tensors(gt_hw)
+
+        # Prepare output
+        if self.mode == 'sequence':
+            data = data.apply(stack_tensors)
+        else:
+            data = data.apply(lambda x: x[0] if isinstance(x, list) else x)
+
+        # Generate label functions
+        if self.label_function_params is not None:
+            data['train_label'] = self._generate_label_function(data['train_anno'])
+            test_label = self._generate_label_function(data['test_anno'])
+
+            data['test_label'] = test_label.unsqueeze(1).expand(-1,num_sq,-1,-1).reshape(-1,self.feature_sz, self.feature_sz)
+            gt_off = torch.zeros(test_label.size(0), self.feature_sz, self.feature_sz, num_sq, 4)
+            postive_mask = test_label > self.threshold
+            for i in range(test_label.size(0)):
+                postive_x = self.p_x[postive_mask[i,...]]
+                postive_y = self.p_y[postive_mask[i,...]]
+                xy_pos = torch.stack((postive_y, postive_x), dim=1)
+                center_off = (xy_pos - self.feature_sz / 2) / self.feature_sz * crop_box[i,2:]
+                center_off = test_anno_ori[i] -center_off - crop_box[i, :2] - crop_box[i, 2:] * 0.5
+
+                center_off = center_off.unsqueeze(1).expand(-1,num_sq, -1) / data['test_proposals'][i,...]
+                postive_gt = torch.cat((center_off, hw_gt[i,...].expand_as(center_off)), -1)
+                gt_off[i,postive_mask[i,...], :, :] = postive_gt
+
+            data['gt_off'] =gt_off.permute(0,3,4,1,2).reshape(-1,4,self.feature_sz,self.feature_sz)
+            data['test_proposals'] = data['test_proposals'].view(-1, 2)
+
+        return data
 
 class KLDiMPProcessing(BaseProcessing):
     """ The processing class used for training PrDiMP that additionally supports the probabilistic classifier and

@@ -6,6 +6,39 @@ from torch._six import string_classes, int_classes
 from pytracking import TensorDict, TensorList
 
 
+class Data_prefetcher():
+    def __init__(self, loader):
+        self.loader = loader
+        self.loader_iter = iter(loader)
+        self.stream = torch.cuda.Stream()
+
+        # With Amp, it isn't necessary to manually convert data to half.
+        # if args.fp16:
+        #     self.mean = self.mean.half()
+        #     self.std = self.std.half()
+        self.preload()
+
+    def preload(self):
+        try:
+            self.next_input = next(self.loader_iter)
+        except StopIteration:
+            self.next_input = None
+            return
+        with torch.cuda.stream(self.stream):
+            self.next_input = self.next_input.cuda(non_blocking=True)
+            # With Amp, it isn't necessary to manually convert data to half.
+            # if args.fp16:
+            #     self.next_input = self.next_input.half()
+            # else:
+
+    def next(self):
+        torch.cuda.current_stream().wait_stream(self.stream)
+        input = self.next_input
+        self.preload()
+        return input
+
+
+
 def _check_use_shared_memory():
     if hasattr(torch.utils.data.dataloader, '_use_shared_memory'):
         return getattr(torch.utils.data.dataloader, '_use_shared_memory')

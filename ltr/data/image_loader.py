@@ -2,6 +2,7 @@ import jpeg4py
 import cv2 as cv
 from PIL import Image
 import numpy as np
+import time
 
 davis_palette = np.repeat(np.expand_dims(np.arange(0,256), 1), 3, 1).astype(np.uint8)
 davis_palette[:22, :] = [[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
@@ -34,7 +35,10 @@ default_image_loader.use_jpeg4py = None
 def jpeg4py_loader(path):
     """ Image reading using jpeg4py https://github.com/ajkxyz/jpeg4py"""
     try:
-        return jpeg4py.JPEG(path).decode()
+        tic =time.time()
+        img = jpeg4py.JPEG(path).decode()
+        #print('============jpeg',time.time()-tic)
+        return img
     except Exception as e:
         print('ERROR: Could not read image "{}"'.format(path))
         print(e)

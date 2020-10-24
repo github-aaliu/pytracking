@@ -31,7 +31,7 @@ class MSCOCOSeq(BaseVideoDataset):
     Note: You also have to install the coco pythonAPI from https://github.com/cocodataset/cocoapi.
     """
 
-    def __init__(self, root=None, image_loader=jpeg4py_loader, data_fraction=None, split="train", version="2014"):
+    def __init__(self, root=None, image_loader=jpeg4py_loader, data_fraction=None, split="train", version="2017"):
         """
         args:
             root - path to the coco dataset.
